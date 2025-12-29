@@ -1,30 +1,41 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Search, Plus, Zap, FileText, Music, Code, Globe, Sparkles, Maximize2, Trash2, Copy } from 'lucide-react';
+import { Search, Plus, Zap, Brain, Target, HelpCircle, CheckCircle, AlertTriangle, Activity, Sparkles, Eye, Trash2, Copy } from 'lucide-react';
 
-// Types
+// ============================================================================
+// TYPES & INTERFACES
+// ============================================================================
+
+type NodeType = 'intent' | 'hypothesis' | 'decision' | 'memory' | 'conflict';
+type NodeStatus = 'idle' | 'processing' | 'validated' | 'error';
+
 interface Position { x: number; y: number; }
 interface Size { width: number; height: number; }
 
-interface NodeContent {
-  text?: string;
-  url?: string;
-  code?: string;
-  output?: string;
+interface EchoNodeData {
+  label: string;
+  type: NodeType;
+  content: string;
+  status: NodeStatus;
+  metadata?: {
+    confidence?: number;
+    impact?: 'high' | 'low';
+    timestamp: number;
+  };
 }
 
 interface Node {
   id: string;
-  type: 'block-editor' | 'media-node' | 'code-capsule' | 'web-portal' | 'note';
   position: Position;
   size: Size;
-  content: NodeContent;
+  data: EchoNodeData;
   zIndex: number;
 }
 
-interface Pipe {
+interface Edge {
   id: string;
   from: string;
   to: string;
+  validated: boolean;
 }
 
 interface ContextMenu {
@@ -33,232 +44,311 @@ interface ContextMenu {
   nodeId: string | null;
 }
 
-// Utility: Calculate line path for pipes
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
 const calculatePipePath = (from: Position, to: Position): string => {
   const midX = (from.x + to.x) / 2;
   return `M ${from.x} ${from.y} C ${midX} ${from.y}, ${midX} ${to.y}, ${to.x} ${to.y}`;
 };
 
-// Component: Base Node Header
-const NodeHeader: React.FC<{
-  node: Node;
-  onConnect: (e: React.MouseEvent) => void;
-  onDelete: () => void;
-}> = ({ node, onConnect, onDelete }) => {
-  const icons = {
-    note: <FileText size={16} />,
-    'media-node': <Music size={16} />,
-    'code-capsule': <Code size={16} />,
-    'block-editor': <FileText size={16} />,
-    'web-portal': <Globe size={16} />
-  };
-
-  const titles = {
-    note: 'Note',
-    'media-node': 'Media',
-    'code-capsule': 'Code',
-    'block-editor': 'Editor',
-    'web-portal': 'Web'
-  };
-
-  return (
-    <div className="node-header bg-gradient-to-r from-purple-500 to-blue-500 p-2 flex items-center justify-between cursor-move">
-      <div className="flex items-center gap-2 text-white">
-        {icons[node.type]}
-        <span className="text-sm font-semibold">{titles[node.type]}</span>
-      </div>
-      <div className="flex gap-1">
-        <button
-          onClick={onConnect}
-          className="w-6 h-6 bg-white/20 hover:bg-white/40 rounded flex items-center justify-center transition-colors"
-          title="Connect"
-        >
-          <Zap size={14} />
-        </button>
-        <button
-          onClick={onDelete}
-          className="w-6 h-6 bg-white/20 hover:bg-red-500 rounded flex items-center justify-center transition-colors"
-          title="Delete"
-        >
-          ×
-        </button>
-      </div>
-    </div>
-  );
+const calculateCognitiveLoad = (nodeCount: number, edgeCount: number): number => {
+  return (nodeCount * 2) + (edgeCount * 1.5);
 };
 
-// Component: Note Node
-const NoteContent: React.FC<{
-  content: NodeContent;
-  onChange: (content: NodeContent) => void;
-}> = ({ content, onChange }) => (
-  <textarea
-    className="w-full h-full resize-none border-none outline-none p-3 bg-yellow-50"
-    value={content.text || ''}
-    onChange={(e) => onChange({ ...content, text: e.target.value })}
-    placeholder="Write a note..."
-    onClick={(e) => e.stopPropagation()}
-  />
-);
+const getLoadColor = (load: number): string => {
+  if (load < 20) return 'text-green-400';
+  if (load < 50) return 'text-yellow-400';
+  return 'text-red-400';
+};
 
-// Component: Code Capsule Node
-const CodeContent: React.FC<{
-  content: NodeContent;
-  onChange: (content: NodeContent) => void;
-  onExecute: () => void;
-}> = ({ content, onChange, onExecute }) => (
-  <div className="flex flex-col h-full">
-    <textarea
-      className="flex-1 resize-none border-none outline-none p-3 font-mono text-sm bg-gray-900 text-green-400"
-      value={content.code || ''}
-      onChange={(e) => onChange({ ...content, code: e.target.value })}
-      placeholder="// Write JavaScript code here\n// Use 'return' to output results"
-      onClick={(e) => e.stopPropagation()}
-    />
-    <div className="border-t border-gray-300 p-2 flex items-center justify-between bg-gray-50">
-      <button
-        onClick={onExecute}
-        className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-sm rounded transition-colors"
-      >
-        ▶ Execute
-      </button>
-      {content.output && (
-        <span className="text-xs text-gray-600 truncate ml-2">Output: {content.output}</span>
-      )}
-    </div>
-  </div>
-);
+const getLoadBg = (load: number): string => {
+  if (load < 20) return 'bg-green-500/20';
+  if (load < 50) return 'bg-yellow-500/20';
+  return 'bg-red-500/20';
+};
 
-// Component: Web Portal Node
-const WebPortalContent: React.FC<{
-  content: NodeContent;
-  onChange: (content: NodeContent) => void;
-}> = ({ content, onChange }) => {
-  const [inputUrl, setInputUrl] = useState(content.url || '');
+// Simple conflict detection based on keywords
+const detectConflicts = (nodes: Node[], edges: Edge[]): string[] => {
+  const conflicts: string[] = [];
+  const conflictKeywords = [
+    ['cheap', 'expensive', 'premium', 'budget'],
+    ['fast', 'slow', 'quick', 'delayed'],
+    ['simple', 'complex', 'easy', 'difficult'],
+    ['secure', 'risky', 'unsafe', 'vulnerable']
+  ];
 
-  return (
-    <div className="flex flex-col h-full">
-      <input
-        type="text"
-        className="w-full p-2 text-sm border-b border-gray-300 outline-none"
-        placeholder="https://example.com"
-        value={inputUrl}
-        onChange={(e) => setInputUrl(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            let url = inputUrl;
-            if (!url.startsWith('http://') && !url.startsWith('https://')) {
-              url = 'https://' + url;
-            }
-            onChange({ ...content, url });
+  edges.forEach(edge => {
+    const fromNode = nodes.find(n => n.id === edge.from);
+    const toNode = nodes.find(n => n.id === edge.to);
+    
+    if (fromNode && toNode) {
+      const fromContent = fromNode.data.content.toLowerCase();
+      const toContent = toNode.data.content.toLowerCase();
+      
+      conflictKeywords.forEach(keywords => {
+        const fromHas = keywords.some(kw => fromContent.includes(kw));
+        const toHas = keywords.some(kw => toContent.includes(kw));
+        
+        if (fromHas && toHas) {
+          const fromWords = keywords.filter(kw => fromContent.includes(kw));
+          const toWords = keywords.filter(kw => toContent.includes(kw));
+          
+          if (fromWords[0] !== toWords[0]) {
+            conflicts.push(edge.id);
           }
-        }}
-        onClick={(e) => e.stopPropagation()}
-      />
-      <div className="flex-1 bg-white relative overflow-hidden">
-        {content.url ? (
-          <iframe
-            src={content.url}
-            className="w-full h-full border-none"
-            title="Web Portal"
-            sandbox="allow-scripts allow-same-origin"
+        }
+      });
+    }
+  });
+  
+  return conflicts;
+};
+
+// ============================================================================
+// NODE TYPE CONFIGURATIONS
+// ============================================================================
+
+const nodeTypeConfig: Record<NodeType, { 
+  icon: React.ReactNode; 
+  color: string; 
+  bgGradient: string;
+  borderColor: string;
+}> = {
+  intent: {
+    icon: <Target size={16} />,
+    color: 'text-blue-400',
+    bgGradient: 'from-blue-500/10 to-blue-600/5',
+    borderColor: 'border-blue-500/30'
+  },
+  hypothesis: {
+    icon: <HelpCircle size={16} />,
+    color: 'text-purple-400',
+    bgGradient: 'from-purple-500/10 to-purple-600/5',
+    borderColor: 'border-purple-500/30'
+  },
+  decision: {
+    icon: <CheckCircle size={16} />,
+    color: 'text-green-400',
+    bgGradient: 'from-green-500/10 to-green-600/5',
+    borderColor: 'border-green-500/30'
+  },
+  memory: {
+    icon: <Brain size={16} />,
+    color: 'text-amber-400',
+    bgGradient: 'from-amber-500/10 to-amber-600/5',
+    borderColor: 'border-amber-500/30'
+  },
+  conflict: {
+    icon: <AlertTriangle size={16} />,
+    color: 'text-red-400',
+    bgGradient: 'from-red-500/10 to-red-600/5',
+    borderColor: 'border-red-500/30'
+  }
+};
+
+const statusConfig: Record<NodeStatus, { color: string; label: string }> = {
+  idle: { color: 'bg-gray-500', label: 'Idle' },
+  processing: { color: 'bg-blue-500 animate-pulse', label: 'Processing' },
+  validated: { color: 'bg-green-500', label: 'Validated' },
+  error: { color: 'bg-red-500', label: 'Error' }
+};
+
+// ============================================================================
+// COMPONENTS
+// ============================================================================
+
+const NodeComponent: React.FC<{
+  node: Node;
+  selected: boolean;
+  onSelect: () => void;
+  onDragStart: (e: React.MouseEvent, offset: Position) => void;
+  onConnect: (e: React.MouseEvent) => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+  onResizeStart: (e: React.MouseEvent) => void;
+  onContentChange: (content: string) => void;
+  onLabelChange: (label: string) => void;
+  isConflicted: boolean;
+}> = ({ node, selected, onSelect, onDragStart, onConnect, onContextMenu, onResizeStart, onContentChange, onLabelChange, isConflicted }) => {
+  const config = nodeTypeConfig[node.data.type];
+  const statusCfg = statusConfig[node.data.status];
+  
+  return (
+    <div
+      className={`absolute backdrop-blur-xl rounded-[24px] border transition-all duration-300 overflow-hidden
+        ${selected ? 'shadow-[0_0_30px_rgba(59,130,246,0.4)] border-blue-500/50' : 'shadow-[0_8px_32px_0_rgba(0,0,0,0.3)]'}
+        ${isConflicted ? 'border-red-500/70 shadow-[0_0_40px_rgba(239,68,68,0.5)]' : config.borderColor}
+        bg-gradient-to-br ${config.bgGradient} bg-white/5`}
+      style={{
+        left: `${node.position.x}px`,
+        top: `${node.position.y}px`,
+        width: `${node.size.width}px`,
+        height: `${node.size.height}px`,
+        zIndex: node.zIndex
+      }}
+      onMouseDown={(e) => {
+        onSelect();
+        if (e.target === e.currentTarget || (e.target as HTMLElement).className.includes('node-header')) {
+          onDragStart(e, {
+            x: e.clientX - node.position.x,
+            y: e.clientY - node.position.y
+          });
+        }
+      }}
+      onContextMenu={onContextMenu}
+    >
+      {/* Header */}
+      <div className={`node-header p-3 flex items-center justify-between cursor-move border-b border-white/10 bg-gradient-to-r ${config.bgGradient}`}>
+        <div className="flex items-center gap-2">
+          <div className={config.color}>
+            {config.icon}
+          </div>
+          <input
+            type="text"
+            value={node.data.label}
+            onChange={(e) => onLabelChange(e.target.value)}
+            className="bg-transparent border-none outline-none text-white text-sm font-semibold w-32"
+            onClick={(e) => e.stopPropagation()}
           />
-        ) : (
-          <div className="flex items-center justify-center h-full text-gray-400">
-            <div className="text-center">
-              <Globe size={48} className="mx-auto mb-2 opacity-30" />
-              <p className="text-sm">Enter a URL and press Enter</p>
-            </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${statusCfg.color}`} title={statusCfg.label} />
+          <button
+            onClick={onConnect}
+            className="w-7 h-7 bg-white/10 hover:bg-white/20 rounded-lg flex items-center justify-center transition-colors"
+          >
+            <Zap size={14} className="text-white/80" />
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="p-4 h-[calc(100%-60px)] overflow-auto">
+        <textarea
+          value={node.data.content}
+          onChange={(e) => onContentChange(e.target.value)}
+          className="w-full h-full resize-none bg-transparent border-none outline-none text-white/90 text-sm placeholder-white/30"
+          placeholder="Enter your thoughts..."
+          onClick={(e) => e.stopPropagation()}
+        />
+        
+        {node.data.metadata && (
+          <div className="mt-2 pt-2 border-t border-white/10 text-xs text-white/50 space-y-1">
+            {node.data.metadata.confidence !== undefined && (
+              <div>Confidence: {(node.data.metadata.confidence * 100).toFixed(0)}%</div>
+            )}
+            {node.data.metadata.impact && (
+              <div className={`inline-block px-2 py-0.5 rounded ${
+                node.data.metadata.impact === 'high' ? 'bg-red-500/20 text-red-400' : 'bg-blue-500/20 text-blue-400'
+              }`}>
+                Impact: {node.data.metadata.impact}
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Resize handle */}
+      <div
+        className="absolute bottom-1 right-1 w-4 h-4 cursor-se-resize opacity-40 hover:opacity-100 transition-opacity"
+        onMouseDown={onResizeStart}
+      >
+        <div className="w-full h-full border-r-2 border-b-2 border-white/50 rounded-br" />
+      </div>
+
+      {/* Connection point */}
+      <div
+        className="absolute bottom-3 right-10 w-3 h-3 bg-blue-500 rounded-full cursor-pointer hover:scale-150 transition-transform shadow-lg"
+        onMouseDown={onConnect}
+      />
     </div>
   );
 };
 
-// Component: Media Node
-const MediaContent: React.FC = () => (
-  <div className="flex items-center justify-center h-full">
-    <div className="relative">
-      <div className="w-24 h-24 rounded-full bg-gradient-to-br from-pink-500 to-purple-500 flex items-center justify-center animate-pulse">
-        <Music className="text-white" size={40} />
-      </div>
-      <div className="absolute inset-0 w-24 h-24 rounded-full bg-purple-500 animate-ping opacity-20"></div>
-    </div>
-  </div>
-);
+// ============================================================================
+// MAIN APP
+// ============================================================================
 
-// Main Component
 const EchoOS: React.FC = () => {
-  // Canvas state
+  // Load from storage
+  const [nodes, setNodes] = useState<Node[]>(() => {
+    const saved = localStorage.getItem('echo-os-nodes');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error('Failed to load nodes:', e);
+      }
+    }
+    return [{
+      id: 'welcome',
+      position: { x: 100, y: 100 },
+      size: { width: 300, height: 200 },
+      data: {
+        label: 'Welcome',
+        type: 'intent',
+        content: 'Welcome to EchoOS Exocortex!\n\nThis is your external brain. Create nodes to organize thoughts, detect conflicts, and expand ideas with AI.',
+        status: 'idle',
+        metadata: { timestamp: Date.now() }
+      },
+      zIndex: 1
+    }];
+  });
+
+  const [edges, setEdges] = useState<Edge[]>(() => {
+    const saved = localStorage.getItem('echo-os-edges');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error('Failed to load edges:', e);
+      }
+    }
+    return [];
+  });
+
   const [viewport, setViewport] = useState<Position>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState<Position>({ x: 0, y: 0 });
-
-  // Nodes state
-  const [nodes, setNodes] = useState<Node[]>([
-    {
-      id: 'welcome',
-      type: 'note',
-      position: { x: 100, y: 100 },
-      size: { width: 300, height: 200 },
-      content: { text: 'Welcome to EchoOS!\n\nPress "+" to create new nodes.\n\nUse your mouse to navigate the infinite space.\n\nRight-click nodes for more options.' },
-      zIndex: 1
-    }
-  ]);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [draggedNode, setDraggedNode] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState<Position>({ x: 0, y: 0 });
   const [resizingNode, setResizingNode] = useState<string | null>(null);
   const [resizeStart, setResizeStart] = useState<{ size: Size; mouse: Position } | null>(null);
-
-  // Pipes state
-  const [pipes, setPipes] = useState<Pipe[]>([]);
-  const [connectingPipe, setConnectingPipe] = useState<{ from: string; pos: Position } | null>(null);
-
-  // UI state
+  const [connectingFrom, setConnectingFrom] = useState<string | null>(null);
+  const [connectingPos, setConnectingPos] = useState<Position | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showMenu, setShowMenu] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenu>({ show: false, position: { x: 0, y: 0 }, nodeId: null });
   const [maxZIndex, setMaxZIndex] = useState(1);
+  const [conflictedEdges, setConflictedEdges] = useState<string[]>([]);
+  const [showInsights, setShowInsights] = useState(false);
 
   const canvasRef = useRef<HTMLDivElement>(null);
 
+  // Save to storage
   useEffect(() => {
-    const savedNodes = localStorage.getItem('echo_nodes');
-    const savedPipes = localStorage.getItem('echo_pipes');
-    
-    if (savedNodes) {
-      try {
-        setNodes(JSON.parse(savedNodes));
-      } catch (e) {
-        console.error("Eroare la încărcarea nodurilor:", e);
-      }
-    }
-    
-    if (savedPipes) {
-      try {
-        setPipes(JSON.parse(savedPipes));
-      } catch (e) {
-        console.error("Eroare la încărcarea pipes:", e);
-      }
-    }
-  }, []); 
+    localStorage.setItem('echo-os-nodes', JSON.stringify(nodes));
+  }, [nodes]);
 
   useEffect(() => {
-    localStorage.setItem('echo_nodes', JSON.stringify(nodes));
-    localStorage.setItem('echo_pipes', JSON.stringify(pipes));
-  }, [nodes, pipes]);
+    localStorage.setItem('echo-os-edges', JSON.stringify(edges));
+  }, [edges]);
 
+  // Detect conflicts
+  useEffect(() => {
+    const conflicts = detectConflicts(nodes, edges);
+    setConflictedEdges(conflicts);
+  }, [nodes, edges]);
 
   // Canvas handlers
   const handleWheel = (e: React.WheelEvent) => {
     if (e.ctrlKey) {
       e.preventDefault();
       const delta = e.deltaY * -0.001;
-      const newZoom = Math.min(Math.max(0.1, zoom + delta), 3);
-      setZoom(newZoom);
+      setZoom(Math.min(Math.max(0.1, zoom + delta), 3));
     } else {
       setViewport({
         x: viewport.x - e.deltaX,
@@ -269,7 +359,6 @@ const EchoOS: React.FC = () => {
 
   const handleMouseDown = (e: React.MouseEvent) => {
     setContextMenu({ show: false, position: { x: 0, y: 0 }, nodeId: null });
-    
     if (e.button === 1 || (e.button === 0 && e.target === canvasRef.current)) {
       setIsPanning(true);
       setPanStart({ x: e.clientX - viewport.x, y: e.clientY - viewport.y });
@@ -298,7 +387,6 @@ const EchoOS: React.FC = () => {
       if (node) {
         const deltaX = (e.clientX - resizeStart.mouse.x) / zoom;
         const deltaY = (e.clientY - resizeStart.mouse.y) / zoom;
-        
         updateNode(resizingNode, {
           size: {
             width: Math.max(200, resizeStart.size.width + deltaX),
@@ -308,11 +396,8 @@ const EchoOS: React.FC = () => {
       }
     }
 
-    if (connectingPipe) {
-      setConnectingPipe({
-        ...connectingPipe,
-        pos: { x: e.clientX, y: e.clientY }
-      });
+    if (connectingFrom) {
+      setConnectingPos({ x: e.clientX, y: e.clientY });
     }
   };
 
@@ -321,20 +406,27 @@ const EchoOS: React.FC = () => {
     setDraggedNode(null);
     setResizingNode(null);
     setResizeStart(null);
-    setConnectingPipe(null);
+    setConnectingFrom(null);
+    setConnectingPos(null);
   };
 
   // Node management
-  const createNode = (type: Node['type']) => {
+  const createNode = (type: NodeType) => {
     const newNode: Node = {
       id: `node-${Date.now()}`,
-      type,
-      position: {
-        x: (-viewport.x / zoom) + 200,
-        y: (-viewport.y / zoom) + 200
+      position: { x: (-viewport.x / zoom) + 200, y: (-viewport.y / zoom) + 200 },
+      size: { width: 300, height: 250 },
+      data: {
+        label: type.charAt(0).toUpperCase() + type.slice(1),
+        type,
+        content: '',
+        status: 'idle',
+        metadata: {
+          timestamp: Date.now(),
+          confidence: type === 'hypothesis' ? 0.5 : undefined,
+          impact: type === 'decision' ? 'low' : undefined
+        }
       },
-      size: type === 'media-node' ? { width: 200, height: 200 } : { width: 350, height: 300 },
-      content: {},
       zIndex: maxZIndex + 1
     };
     setNodes([...nodes, newNode]);
@@ -348,7 +440,7 @@ const EchoOS: React.FC = () => {
 
   const deleteNode = (id: string) => {
     setNodes(nodes.filter(n => n.id !== id));
-    setPipes(pipes.filter(p => p.from !== id && p.to !== id));
+    setEdges(edges.filter(e => e.from !== id && e.to !== id));
   };
 
   const duplicateNode = (id: string) => {
@@ -371,229 +463,146 @@ const EchoOS: React.FC = () => {
     setMaxZIndex(newZIndex);
   };
 
-  // Pipe management
+  // Edge management
   const startConnecting = (nodeId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setConnectingPipe({ from: nodeId, pos: { x: e.clientX, y: e.clientY } });
+    setConnectingFrom(nodeId);
+    setConnectingPos({ x: e.clientX, y: e.clientY });
   };
 
-  const finishConnecting = (toNodeId: string) => {
-    if (connectingPipe && connectingPipe.from !== toNodeId) {
-      const newPipe: Pipe = {
-        id: `pipe-${Date.now()}`,
-        from: connectingPipe.from,
-        to: toNodeId
+  const finishConnection = (toId: string) => {
+    if (connectingFrom && connectingFrom !== toId) {
+      const newEdge: Edge = {
+        id: `edge-${Date.now()}`,
+        from: connectingFrom,
+        to: toId,
+        validated: false
       };
-      setPipes([...pipes, newPipe]);
-      executePipe(connectingPipe.from, toNodeId);
-    }
-    setConnectingPipe(null);
-  };
-
-  const executePipe = (fromId: string, toId: string) => {
-    const fromNode = nodes.find(n => n.id === fromId);
-    const toNode = nodes.find(n => n.id === toId);
-
-    if (fromNode && toNode) {
-      // Code execution: Code -> Any node
-      if (fromNode.type === 'code-capsule' && fromNode.content.code) {
-        try {
-          const userCode = new Function(fromNode.content.code);
-          const result = userCode();
-          
-          updateNode(fromId, {
-            content: { ...fromNode.content, output: String(result) }
-          });
-          
-          if (toNode.type === 'note') {
-            updateNode(toId, {
-              content: { ...toNode.content, text: (toNode.content.text || '') + `\n> Result: ${result}` }
-            });
-          }
-        } catch (err: any) {
-          updateNode(fromId, {
-            content: { ...fromNode.content, output: `Error: ${err.message}` }
-          });
-        }
-      }
-      
-      // Data transfer: Note -> Code
-      if (fromNode.type === 'note' && toNode.type === 'code-capsule') {
-        updateNode(toId, {
-          content: { ...toNode.content, code: `// Data from note "${fromId}"\n${toNode.content.code || ''}` }
-        });
-      }
+      setEdges([...edges, newEdge]);
     }
   };
 
-  const executeCode = (nodeId: string) => {
+  // AI Functions
+  const expandIntent = async (nodeId: string) => {
     const node = nodes.find(n => n.id === nodeId);
-    if (node && node.type === 'code-capsule' && node.content.code) {
-      try {
-        const userCode = new Function(node.content.code);
-        const result = userCode();
-        updateNode(nodeId, {
-          content: { ...node.content, output: String(result) }
-        });
-      } catch (err: any) {
-        updateNode(nodeId, {
-          content: { ...node.content, output: `Error: ${err.message}` }
-        });
-      }
-    }
+    if (!node) return;
+
+    updateNode(nodeId, { data: { ...node.data, status: 'processing' } });
+
+    // Simulate AI expansion
+    setTimeout(() => {
+      const newNodes: Node[] = [
+        {
+          id: `node-${Date.now()}-1`,
+          position: { x: node.position.x + 350, y: node.position.y - 100 },
+          size: { width: 280, height: 200 },
+          data: {
+            label: 'Sub-goal 1',
+            type: 'hypothesis',
+            content: `Breaking down: ${node.data.content.slice(0, 50)}...`,
+            status: 'idle',
+            metadata: { confidence: 0.7, timestamp: Date.now() }
+          },
+          zIndex: maxZIndex + 1
+        },
+        {
+          id: `node-${Date.now()}-2`,
+          position: { x: node.position.x + 350, y: node.position.y + 100 },
+          size: { width: 280, height: 200 },
+          data: {
+            label: 'Sub-goal 2',
+            type: 'hypothesis',
+            content: 'Alternative approach to consider',
+            status: 'idle',
+            metadata: { confidence: 0.6, timestamp: Date.now() }
+          },
+          zIndex: maxZIndex + 2
+        }
+      ];
+
+      setNodes([...nodes, ...newNodes]);
+      setEdges([
+        ...edges,
+        { id: `edge-${Date.now()}-1`, from: nodeId, to: newNodes[0].id, validated: false },
+        { id: `edge-${Date.now()}-2`, from: nodeId, to: newNodes[1].id, validated: false }
+      ]);
+      setMaxZIndex(maxZIndex + 2);
+      updateNode(nodeId, { data: { ...node.data, status: 'validated' } });
+    }, 1500);
   };
 
-  // Search and commands
-  const handleSearch = () => {
-    const query = searchQuery.toLowerCase();
+  const generateInsights = () => {
+    const insights: string[] = [];
+    
+    // Count node types
+    const typeCounts: Record<string, number> = {};
+    nodes.forEach(n => {
+      typeCounts[n.data.type] = (typeCounts[n.data.type] || 0) + 1;
+    });
+    
+    insights.push(`Graph contains ${nodes.length} nodes and ${edges.length} connections.`);
+    insights.push(`Node distribution: ${Object.entries(typeCounts).map(([k,v]) => `${k}: ${v}`).join(', ')}`);
+    
+    if (conflictedEdges.length > 0) {
+      insights.push(`⚠️ ${conflictedEdges.length} potential conflicts detected!`);
+    }
+    
+    const cogLoad = calculateCognitiveLoad(nodes.length, edges.length);
+    insights.push(`Cognitive load: ${cogLoad.toFixed(1)} ${cogLoad < 20 ? '(Optimal)' : cogLoad < 50 ? '(Moderate)' : '(High - consider organizing)'}`);
+    
+    return insights.join('\n\n');
+  };
 
-    if (query.includes('create') || query.includes('new')) {
-      if (query.includes('note')) createNode('note');
-      else if (query.includes('code')) createNode('code-capsule');
-      else if (query.includes('editor')) createNode('block-editor');
-      else if (query.includes('media') || query.includes('music')) createNode('media-node');
-      else if (query.includes('web') || query.includes('portal')) createNode('web-portal');
-    } else if (query.includes('organize') || query.includes('arrange')) {
-      autoOrganize();
-    } else if (query.includes('clear') || query.includes('delete all')) {
-      if (window.confirm('Delete all nodes?')) {
+  // Search commands
+  const handleSearch = () => {
+    const q = searchQuery.toLowerCase();
+    if (q.includes('intent')) createNode('intent');
+    else if (q.includes('hypothesis')) createNode('hypothesis');
+    else if (q.includes('decision')) createNode('decision');
+    else if (q.includes('memory')) createNode('memory');
+    else if (q.includes('conflict')) createNode('conflict');
+    else if (q.includes('expand') && selectedNode) expandIntent(selectedNode);
+    else if (q.includes('insights') || q.includes('explain')) setShowInsights(true);
+    else if (q.includes('clear')) {
+      if (window.confirm('Clear all nodes and edges?')) {
         setNodes([]);
-        setPipes([]);
+        setEdges([]);
       }
     }
-
     setSearchQuery('');
   };
 
-  const autoOrganize = () => {
-    let x = 50;
-    let y = 50;
-    const spacing = 50;
-
-    const organized = [...nodes].sort((a, b) => a.type.localeCompare(b.type));
-    organized.forEach((node) => {
-      updateNode(node.id, { position: { x, y } });
-      x += node.size.width + spacing;
-      if (x > 1200) {
-        x = 50;
-        y += 350;
-      }
-    });
-  };
-
-  // Context menu
-  const handleContextMenu = (e: React.MouseEvent, nodeId: string) => {
-    e.preventDefault();
-    setContextMenu({
-      show: true,
-      position: { x: e.clientX, y: e.clientY },
-      nodeId
-    });
-  };
-
-  // Render node
-  const renderNode = (node: Node) => {
-    return (
-      <div
-        key={node.id}
-        className={`absolute bg-white rounded-lg shadow-2xl border-2 ${
-          selectedNode === node.id ? 'border-blue-500' : 'border-gray-200'
-        } overflow-hidden transition-shadow hover:shadow-3xl`}
-        style={{
-          left: `${node.position.x}px`,
-          top: `${node.position.y}px`,
-          width: `${node.size.width}px`,
-          height: `${node.size.height}px`,
-          zIndex: node.zIndex
-        }}
-        onMouseDown={(e) => {
-          e.stopPropagation();
-          setSelectedNode(node.id);
-          bringToFront(node.id);
-          if (e.target === e.currentTarget || (e.target as HTMLElement).className.includes('node-header')) {
-            setDraggedNode(node.id);
-            setDragOffset({
-              x: (e.clientX - viewport.x) / zoom - node.position.x,
-              y: (e.clientY - viewport.y) / zoom - node.position.y
-            });
-          }
-        }}
-        onContextMenu={(e) => handleContextMenu(e, node.id)}
-      >
-        <NodeHeader
-          node={node}
-          onConnect={(e) => startConnecting(node.id, e)}
-          onDelete={() => deleteNode(node.id)}
-        />
-
-        <div className="h-[calc(100%-40px)] overflow-hidden">
-          {node.type === 'note' && (
-            <NoteContent
-              content={node.content}
-              onChange={(content) => updateNode(node.id, { content })}
-            />
-          )}
-          {node.type === 'block-editor' && (
-            <NoteContent
-              content={node.content}
-              onChange={(content) => updateNode(node.id, { content })}
-            />
-          )}
-          {node.type === 'code-capsule' && (
-            <CodeContent
-              content={node.content}
-              onChange={(content) => updateNode(node.id, { content })}
-              onExecute={() => executeCode(node.id)}
-            />
-          )}
-          {node.type === 'web-portal' && (
-            <WebPortalContent
-              content={node.content}
-              onChange={(content) => updateNode(node.id, { content })}
-            />
-          )}
-          {node.type === 'media-node' && <MediaContent />}
-        </div>
-
-        {/* Resize handle */}
-        <div
-          className="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize hover:bg-blue-300 rounded-tl transition-colors"
-          onMouseDown={(e) => {
-            e.stopPropagation();
-            setResizingNode(node.id);
-            setResizeStart({
-              size: { ...node.size },
-              mouse: { x: e.clientX, y: e.clientY }
-            });
-          }}
-        >
-          <Maximize2 size={12} className="opacity-40" />
-        </div>
-
-        {/* Connection point */}
-        <div
-          className="absolute bottom-2 right-12 w-4 h-4 bg-blue-500 rounded-full cursor-pointer hover:scale-125 transition-transform shadow-lg"
-          onMouseDown={(e) => startConnecting(node.id, e)}
-          onMouseUp={() => connectingPipe && finishConnecting(node.id)}
-        />
-      </div>
-    );
-  };
+  const cogLoad = calculateCognitiveLoad(nodes.length, edges.length);
 
   return (
-    <div className="w-full h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 overflow-hidden relative">
+    <div className="w-full h-screen bg-slate-950 overflow-hidden relative">
       {/* Search Bar */}
       <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50">
-        <div className="bg-white/10 backdrop-blur-xl rounded-full px-5 py-3 flex items-center gap-3 border border-white/20 shadow-2xl">
+        <div className="bg-white/5 backdrop-blur-xl rounded-full px-5 py-3 flex items-center gap-3 border border-white/10 shadow-2xl">
           <Search className="text-white/60" size={20} />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
-            placeholder='Try "create a note" or "organize"...'
-            className="bg-transparent border-none outline-none text-white placeholder-white/40 w-96 text-sm"
+            placeholder='Try "create intent" or "expand" or "insights"...'
+            className="bg-transparent border-none outline-none text-white placeholder-white/30 w-96 text-sm"
           />
+        </div>
+      </div>
+
+      {/* Cognitive Load Monitor */}
+      <div className={`absolute top-4 left-4 backdrop-blur-xl rounded-2xl px-4 py-3 border border-white/10 shadow-xl z-50 ${getLoadBg(cogLoad)}`}>
+        <div className="flex items-center gap-3">
+          <Activity className={`${getLoadColor(cogLoad)}`} size={20} />
+          <div>
+            <div className={`text-sm font-semibold ${getLoadColor(cogLoad)}`}>
+              Load: {cogLoad.toFixed(1)}
+            </div>
+            <div className="text-xs text-white/50">
+              {cogLoad < 20 ? 'Optimal' : cogLoad < 50 ? 'Moderate' : 'High'}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -607,42 +616,75 @@ const EchoOS: React.FC = () => {
         </button>
 
         {showMenu && (
-          <div className="absolute right-0 mt-2 bg-white rounded-xl shadow-2xl p-2 w-56 border border-gray-100">
-            <button onClick={() => createNode('note')} className="w-full text-left px-4 py-2 hover:bg-blue-50 rounded-lg flex items-center gap-3 transition-colors">
-              <FileText size={18} className="text-yellow-600" /> <span className="font-medium">Note</span>
+          <div className="absolute right-0 mt-2 bg-slate-900/95 backdrop-blur-xl rounded-2xl shadow-2xl p-2 w-56 border border-white/10">
+            <button onClick={() => createNode('intent')} className="w-full text-left px-4 py-2.5 hover:bg-white/5 rounded-xl flex items-center gap-3 text-white transition-colors">
+              <Target size={18} className="text-blue-400" /> Intent
             </button>
-            <button onClick={() => createNode('block-editor')} className="w-full text-left px-4 py-2 hover:bg-blue-50 rounded-lg flex items-center gap-3 transition-colors">
-              <FileText size={18} className="text-blue-600" /> <span className="font-medium">Block Editor</span>
+            <button onClick={() => createNode('hypothesis')} className="w-full text-left px-4 py-2.5 hover:bg-white/5 rounded-xl flex items-center gap-3 text-white transition-colors">
+              <HelpCircle size={18} className="text-purple-400" /> Hypothesis
             </button>
-            <button onClick={() => createNode('code-capsule')} className="w-full text-left px-4 py-2 hover:bg-blue-50 rounded-lg flex items-center gap-3 transition-colors">
-              <Code size={18} className="text-green-600" /> <span className="font-medium">Code Capsule</span>
+            <button onClick={() => createNode('decision')} className="w-full text-left px-4 py-2.5 hover:bg-white/5 rounded-xl flex items-center gap-3 text-white transition-colors">
+              <CheckCircle size={18} className="text-green-400" /> Decision
             </button>
-            <button onClick={() => createNode('media-node')} className="w-full text-left px-4 py-2 hover:bg-blue-50 rounded-lg flex items-center gap-3 transition-colors">
-              <Music size={18} className="text-pink-600" /> <span className="font-medium">Media Node</span>
+            <button onClick={() => createNode('memory')} className="w-full text-left px-4 py-2.5 hover:bg-white/5 rounded-xl flex items-center gap-3 text-white transition-colors">
+              <Brain size={18} className="text-amber-400" /> Memory
             </button>
-            <button onClick={() => createNode('web-portal')} className="w-full text-left px-4 py-2 hover:bg-blue-50 rounded-lg flex items-center gap-3 transition-colors">
-              <Globe size={18} className="text-indigo-600" /> <span className="font-medium">Web Portal</span>
+            <button onClick={() => createNode('conflict')} className="w-full text-left px-4 py-2.5 hover:bg-white/5 rounded-xl flex items-center gap-3 text-white transition-colors">
+              <AlertTriangle size={18} className="text-red-400" /> Conflict
             </button>
-            <hr className="my-2 border-gray-200" />
-            <button onClick={autoOrganize} className="w-full text-left px-4 py-2 hover:bg-purple-50 rounded-lg flex items-center gap-3 text-purple-600 transition-colors">
-              <Sparkles size={18} /> <span className="font-medium">Auto-Organize</span>
+            <hr className="my-2 border-white/10" />
+            <button onClick={() => selectedNode && expandIntent(selectedNode)} className="w-full text-left px-4 py-2.5 hover:bg-white/5 rounded-xl flex items-center gap-3 text-purple-400 transition-colors">
+              <Sparkles size={18} /> Expand Selected
+            </button>
+            <button onClick={() => setShowInsights(true)} className="w-full text-left px-4 py-2.5 hover:bg-white/5 rounded-xl flex items-center gap-3 text-blue-400 transition-colors">
+              <Eye size={18} /> View Insights
             </button>
           </div>
         )}
       </div>
 
+      {/* Insights Panel */}
+      {showInsights && (
+        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center" onClick={() => setShowInsights(false)}>
+          <div className="bg-slate-900/95 backdrop-blur-xl rounded-3xl p-6 max-w-2xl w-full mx-4 border border-white/10 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
+              <Brain className="text-blue-400" />
+              Graph Insights
+            </h2>
+            <pre className="text-white/80 text-sm whitespace-pre-wrap font-mono bg-black/30 p-4 rounded-xl">
+              {generateInsights()}
+            </pre>
+            <button
+              onClick={() => setShowInsights(false)}
+              className="mt-4 px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-xl transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Context Menu */}
       {contextMenu.show && (
         <div
-          className="absolute bg-white rounded-lg shadow-2xl p-2 w-48 z-50 border border-gray-100"
+          className="absolute bg-slate-900/95 backdrop-blur-xl rounded-xl shadow-2xl p-2 w-48 z-50 border border-white/10"
           style={{ left: contextMenu.position.x, top: contextMenu.position.y }}
         >
+          <button
+            onClick={() => {
+              if (contextMenu.nodeId) expandIntent(contextMenu.nodeId);
+              setContextMenu({ show: false, position: { x: 0, y: 0 }, nodeId: null });
+            }}
+            className="w-full text-left px-3 py-2 hover:bg-white/5 rounded-lg flex items-center gap-2 text-white text-sm"
+          >
+            <Sparkles size={16} className="text-purple-400" /> Expand with AI
+          </button>
           <button
             onClick={() => {
               if (contextMenu.nodeId) duplicateNode(contextMenu.nodeId);
               setContextMenu({ show: false, position: { x: 0, y: 0 }, nodeId: null });
             }}
-            className="w-full text-left px-3 py-2 hover:bg-gray-100 rounded flex items-center gap-2"
+            className="w-full text-left px-3 py-2 hover:bg-white/5 rounded-lg flex items-center gap-2 text-white text-sm"
           >
             <Copy size={16} /> Duplicate
           </button>
@@ -651,7 +693,7 @@ const EchoOS: React.FC = () => {
               if (contextMenu.nodeId) deleteNode(contextMenu.nodeId);
               setContextMenu({ show: false, position: { x: 0, y: 0 }, nodeId: null });
             }}
-            className="w-full text-left px-3 py-2 hover:bg-red-50 text-red-600 rounded flex items-center gap-2"
+            className="w-full text-left px-3 py-2 hover:bg-red-500/10 text-red-400 rounded-lg flex items-center gap-2 text-sm"
           >
             <Trash2 size={16} /> Delete
           </button>
@@ -659,10 +701,12 @@ const EchoOS: React.FC = () => {
       )}
 
       {/* Info Panel */}
-      <div className="absolute bottom-4 left-4 bg-white/10 backdrop-blur-xl rounded-xl px-4 py-3 text-white/90 text-sm z-50 shadow-xl border border-white/10">
-        <div className="font-semibold">Zoom: {(zoom * 100).toFixed(0)}% | Nodes: {nodes.length} | Pipes: {pipes.length}</div>
-        <div className="text-xs text-white/60 mt-1">
-          Scroll to pan | Ctrl+Scroll to zoom | Drag to move | Right-click for options
+      <div className="absolute bottom-4 left-4 bg-white/5 backdrop-blur-xl rounded-2xl px-4 py-3 text-white/80 text-sm z-50 border border-white/10">
+        <div className="font-semibold">
+          Nodes: {nodes.length} | Edges: {edges.length} | Conflicts: {conflictedEdges.length}
+        </div>
+        <div className="text-xs text-white/50 mt-1">
+          Scroll: Pan | Ctrl+Scroll: Zoom | Right-click: Options
         </div>
       </div>
 
@@ -678,22 +722,33 @@ const EchoOS: React.FC = () => {
       >
         {/* Grid */}
         <div
-          className="absolute inset-0 opacity-10"
+          className="absolute inset-0 opacity-5"
           style={{
             backgroundImage: `
-              linear-gradient(rgba(255,255,255,0.15) 1px, transparent 1px),
-              linear-gradient(90deg, rgba(255,255,255,0.15) 1px, transparent 1px)
+              linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px),
+              linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)
             `,
             backgroundSize: `${50 * zoom}px ${50 * zoom}px`,
             backgroundPosition: `${viewport.x}px ${viewport.y}px`
           }}
         />
 
-        {/* Pipes SVG */}
+        {/* Edges SVG */}
         <svg className="absolute inset-0 pointer-events-none w-full h-full">
-          {pipes.map(pipe => {
-            const fromNode = nodes.find(n => n.id === pipe.from);
-            const toNode = nodes.find(n => n.id === pipe.to);
+          <defs>
+            <linearGradient id="edge-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#3b82f6" />
+              <stop offset="100%" stopColor="#8b5cf6" />
+            </linearGradient>
+            <linearGradient id="conflict-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#ef4444" />
+              <stop offset="100%" stopColor="#f97316" />
+            </linearGradient>
+          </defs>
+          
+          {edges.map(edge => {
+            const fromNode = nodes.find(n => n.id === edge.from);
+            const toNode = nodes.find(n => n.id === edge.to);
             if (!fromNode || !toNode) return null;
 
             const from = {
@@ -705,19 +760,22 @@ const EchoOS: React.FC = () => {
               y: (toNode.position.y + toNode.size.height / 2) * zoom + viewport.y
             };
 
+            const isConflicted = conflictedEdges.includes(edge.id);
+
             return (
               <path
-                key={pipe.id}
+                key={edge.id}
                 d={calculatePipePath(from, to)}
-                stroke="url(#gradient)"
-                strokeWidth="3"
+                stroke={isConflicted ? 'url(#conflict-gradient)' : 'url(#edge-gradient)'}
+                strokeWidth={isConflicted ? 4 : 2}
                 fill="none"
-                className="drop-shadow-lg"
+                className={`drop-shadow-lg ${isConflicted ? 'animate-pulse' : ''}`}
               />
             );
           })}
-          {connectingPipe && (() => {
-            const fromNode = nodes.find(n => n.id === connectingPipe.from);
+          
+          {connectingFrom && connectingPos && (() => {
+            const fromNode = nodes.find(n => n.id === connectingFrom);
             if (!fromNode) return null;
             const from = {
               x: (fromNode.position.x + fromNode.size.width / 2) * zoom + viewport.x,
@@ -725,20 +783,14 @@ const EchoOS: React.FC = () => {
             };
             return (
               <path
-                d={calculatePipePath(from, connectingPipe.pos)}
+                d={calculatePipePath(from, connectingPos)}
                 stroke="#60a5fa"
-                strokeWidth="3"
+                strokeWidth="2"
                 strokeDasharray="8,4"
                 fill="none"
               />
             );
           })()}
-          <defs>
-            <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#3b82f6" />
-              <stop offset="100%" stopColor="#8b5cf6" />
-            </linearGradient>
-          </defs>
         </svg>
 
         {/* Nodes */}
@@ -749,7 +801,67 @@ const EchoOS: React.FC = () => {
             transformOrigin: '0 0'
           }}
         >
-          {nodes.map(renderNode)}
+          {nodes.map(node => (
+            <NodeComponent
+              key={node.id}
+              node={node}
+              selected={selectedNode === node.id}
+              onSelect={() => {
+                setSelectedNode(node.id);
+                bringToFront(node.id);
+              }}
+              onDragStart={(e, offset) => {
+                setDraggedNode(node.id);
+                setDragOffset(offset);
+              }}
+              onConnect={(e) => startConnecting(node.id, e)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({
+                  show: true,
+                  position: { x: e.clientX, y: e.clientY },
+                  nodeId: node.id
+                });
+              }}
+              onResizeStart={(e) => {
+                e.stopPropagation();
+                setResizingNode(node.id);
+                setResizeStart({
+                  size: { ...node.size },
+                  mouse: { x: e.clientX, y: e.clientY }
+                });
+              }}
+              onContentChange={(content) => {
+                updateNode(node.id, {
+                  data: { ...node.data, content }
+                });
+              }}
+              onLabelChange={(label) => {
+                updateNode(node.id, {
+                  data: { ...node.data, label }
+                });
+              }}
+              isConflicted={edges.some(e => 
+                (e.from === node.id || e.to === node.id) && conflictedEdges.includes(e.id)
+              )}
+            />
+          ))}
+          
+          {/* Connection target zones */}
+          {connectingFrom && nodes.filter(n => n.id !== connectingFrom).map(node => (
+            <div
+              key={`target-${node.id}`}
+              className="absolute border-2 border-blue-400 rounded-[24px] pointer-events-auto cursor-pointer animate-pulse"
+              style={{
+                left: `${node.position.x - 10}px`,
+                top: `${node.position.y - 10}px`,
+                width: `${node.size.width + 20}px`,
+                height: `${node.size.height + 20}px`,
+                zIndex: 9999
+              }}
+              onMouseUp={() => finishConnection(node.id)}
+            />
+          ))}
         </div>
       </div>
     </div>
